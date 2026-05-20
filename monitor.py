@@ -20,8 +20,8 @@ CHAT_ID = "177924919"
 SEEN_FILE = "seen_bonds.json"
 
 # Минимальные купоны для уведомлений
-MIN_COUPON_AMD = 10.0   # % для AMD облигаций
-MIN_COUPON_USD = 5.5    # % для USD облигаций
+MIN_COUPON_AMD = 9.0   # % для AMD облигаций
+MIN_COUPON_USD = 8.0    # % для USD облигаций
 
 # Источники для мониторинга
 SOURCES = [
