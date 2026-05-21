@@ -3,7 +3,10 @@
 Armenia Bonds Monitor
 1. Новые размещения облигаций
 2. Напоминания о погашении бумаг портфеля
-3. Новости: эмитенты портфеля, макро Армении, геополитика, купонные выплаты
+3. Купонные выплаты (за 3 дня / в день / проверка через 5 дней)
+4. Новости: эмитенты портфеля, макро Армении, геополитика
+   Источники: Google News, Bing News, sputnik_armenia (Telegram)
+   Перевод на русский через Google Translate (без ключа)
 """
 
 import requests
@@ -27,12 +30,10 @@ SEEN_NEWS_FILE = "seen_news.json"
 
 MIN_COUPON_AMD = 9.0
 MIN_COUPON_USD = 8.0
-
-# Новости за последние N часов (с запасом — запуски 9:00 и 18:00)
 NEWS_LOOKBACK_HOURS = 12
 
 # ============================================================
-# ПОРТФЕЛЬ — бумаги с датами погашения и купонными датами
+# ПОРТФЕЛЬ
 # ============================================================
 PORTFOLIO = [
     {"name": "HELCB5 (ENA AMD)",           "isin": "HELCB5",       "maturity": "2030-11-01", "coupon": "10.75%", "currency": "AMD", "coupon_freq_months": 3},
@@ -48,7 +49,7 @@ PORTFOLIO = [
 ]
 
 # ============================================================
-# ИСТОЧНИКИ ДЛЯ НОВЫХ РАЗМЕЩЕНИЙ
+# ИСТОЧНИКИ
 # ============================================================
 SOURCES = [
     {"name": "ArmBanks", "url": "https://armbanks.am/en/category/capital_market/", "base_url": "https://armbanks.am"},
@@ -58,22 +59,14 @@ SOURCES = [
 
 BOND_KEYWORDS = ["bond", "bonds", "placement", "coupon", "maturity", "AMD bond", "USD bond", "issuance", "tranche"]
 
-# ============================================================
-# НОВОСТНЫЕ ЗАПРОСЫ (Google News RSS)
-# Каждый запрос — отдельная категория. Все они идут в одно сообщение.
-# ============================================================
 NEWS_QUERIES = {
     "Эмитенты портфеля": [
-        # ENA — самая горячая история
         '"Electric Networks of Armenia" OR ENA Armenia',
         '"Электрические сети Армении"',
-        # Team Holding / Telecom Armenia
         '"Team Holding" Armenia bonds',
         '"Telecom Armenia" OR "Team Telecom Armenia"',
-        # Прочие эмитенты
         '"Dalan Technopark" OR "Dalan Technologies"',
         '"Intelligent Management" Armenia bonds',
-        # Банки портфеля
         '"ACBA Bank" Armenia',
         '"Unibank" Armenia',
         '"Ameriabank"',
@@ -95,12 +88,49 @@ NEWS_QUERIES = {
     ],
 }
 
+# Темы для Bing (с описанием) — только самое важное
+BING_QUERIES = [
+    "Electric Networks of Armenia ENA",
+    "Samvel Karapetyan Armenia",
+    "Team Holding Armenia bonds",
+    "Armenia Central Bank rate",
+    "Armenia Moody's Fitch rating",
+]
+
+# Telegram-каналы (публичные через t.me/s/...)
+TG_CHANNELS = ["sputnik_armenia"]
+# Фильтр для постов из ТГ — должны содержать одно из этих слов
+TG_KEYWORDS_RU = [
+    "облигац", "купон", "размещен", "Карапетян", "ЭСА", "электросет",
+    "ставк", "ВВП", "бюджет", "Moody", "Fitch", "рейтинг",
+    "Team Holding", "Ameriabank", "Freedom", "Юнибанк", "ACBA",
+    "арбитраж", "Стокгольм", "санкци",
+]
+
 # ============================================================
-# TELEGRAM
+# ПЕРЕВОД (Google Translate без ключа)
+# ============================================================
+def translate(text, target="ru"):
+    if not text or not text.strip():
+        return text
+    # Если уже на русском — пропускаем
+    if re.search(r'[а-яА-Я]', text) and not re.search(r'[a-zA-Z]{4}', text):
+        return text
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target}&dt=t&q={quote(text[:1500])}"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code != 200:
+            return text
+        return "".join(p[0] for p in r.json()[0] if p[0])
+    except Exception as e:
+        print(f"Translate error: {e}")
+        return text
+
+# ============================================================
+# TELEGRAM ОТПРАВКА
 # ============================================================
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # Telegram лимит 4096 символов — режем если длиннее
     if len(message) > 4000:
         message = message[:3950] + "\n\n…(обрезано)"
     try:
@@ -111,7 +141,6 @@ def send_telegram(message):
         return False
 
 def send_long_message(header, items):
-    """Отправляет длинное сообщение, разбивая на части если нужно."""
     if not items:
         return 0
     chunks = []
@@ -134,7 +163,7 @@ def send_long_message(header, items):
     return sent
 
 # ============================================================
-# ПОГАШЕНИЯ ИЗ ПОРТФЕЛЯ
+# ПОГАШЕНИЯ
 # ============================================================
 def check_maturities():
     today = datetime.now().date()
@@ -163,15 +192,12 @@ def check_maturities():
                 f"💡 Подумай о реинвестировании!"
             )
             if send_telegram(msg):
-                print(f"✅ Напоминание: {bond['name']} — {days_left} дней")
+                print(f"✅ Погашение: {bond['name']} — {days_left} дней")
 
 # ============================================================
-# КУПОННЫЕ ВЫПЛАТЫ
-# Считаем следующую купонную дату от maturity, идя назад.
-# Напоминаем за 3 дня и в день выплаты, проверяем через 5 дней.
+# КУПОНЫ
 # ============================================================
 def get_coupon_dates(bond):
-    """Возвращает все купонные даты от сегодня до погашения."""
     maturity = datetime.strptime(bond["maturity"], "%Y-%m-%d").date()
     freq = bond.get("coupon_freq_months", 6)
     today = datetime.now().date()
@@ -180,7 +206,6 @@ def get_coupon_dates(bond):
     while d > today - timedelta(days=30):
         if d >= today - timedelta(days=30):
             dates.append(d)
-        # вычитаем freq месяцев
         new_month = d.month - freq
         new_year = d.year
         while new_month <= 0:
@@ -203,14 +228,14 @@ def check_coupons():
             if delta == 3:
                 alerts.append(f"💰 <b>{bond['name']}</b> — купон через 3 дня ({coupon_date.strftime('%d.%m.%Y')}, {bond['coupon']} {bond['currency']})")
             elif delta == 0:
-                alerts.append(f"✅ <b>{bond['name']}</b> — купон сегодня ({bond['coupon']} {bond['currency']}). Проверь зачисление в Ameriabank/Freedom.")
+                alerts.append(f"✅ <b>{bond['name']}</b> — купон сегодня ({bond['coupon']} {bond['currency']}). Проверь зачисление.")
             elif delta == -5:
-                alerts.append(f"❓ <b>{bond['name']}</b> — купон был 5 дней назад ({coupon_date.strftime('%d.%m.%Y')}). Если не зачислили — напиши брокеру.")
+                alerts.append(f"❓ <b>{bond['name']}</b> — купон был 5 дней назад ({coupon_date.strftime('%d.%m.%Y')}). Если не зачислили — пиши брокеру.")
     if alerts:
         send_long_message("💵 <b>Купонные выплаты</b>", alerts)
 
 # ============================================================
-# МОНИТОРИНГ НОВЫХ ВЫПУСКОВ (как было)
+# НОВЫЕ ВЫПУСКИ (старая логика)
 # ============================================================
 def load_seen(path=SEEN_FILE):
     if os.path.exists(path):
@@ -222,8 +247,8 @@ def save_seen(seen, path=SEEN_FILE):
     with open(path, "w") as f:
         json.dump(list(seen), f)
 
-def make_id(url):
-    return hashlib.md5(url.encode()).hexdigest()
+def make_id(s):
+    return hashlib.md5(s.encode()).hexdigest()
 
 def extract_bond_info(text):
     info = {}
@@ -249,10 +274,9 @@ def is_interesting(info):
     return False
 
 def fetch_articles(source):
-    headers = {"User-Agent": "Mozilla/5.0"}
     articles = []
     try:
-        r = requests.get(source["url"], headers=headers, timeout=15)
+        r = requests.get(source["url"], headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -278,8 +302,9 @@ def fetch_article_text(url):
         return ""
 
 def format_bond_message(article, info):
+    title_ru = translate(article['title'])
     lines = ["🇦🇲 <b>Новое размещение облигаций!</b>", ""]
-    lines.append(f"📰 <b>{article['title']}</b>")
+    lines.append(f"📰 <b>{title_ru}</b>")
     lines.append(f"🔗 {article['url']}")
     lines.append(f"📡 {article['source']}")
     lines.append("")
@@ -310,14 +335,12 @@ def run_new_bonds_monitor():
                 if send_telegram(format_bond_message(article, info)):
                     new_count += 1
     save_seen(seen)
-    print(f"Новых размещений: {new_count}")
+    print(f"Новые выпуски: {new_count}")
 
 # ============================================================
-# НОВОСТИ ЧЕРЕЗ GOOGLE NEWS RSS
-# Один запрос на тему → собираем все свежие за NEWS_LOOKBACK_HOURS часов
+# НОВОСТИ: Google News + Bing News + Telegram
 # ============================================================
 def fetch_google_news(query):
-    """Возвращает список свежих новостей по запросу из Google News RSS."""
     url = f"https://news.google.com/rss/search?q={quote(query)}&hl=en&gl=AM&ceid=AM:en"
     items = []
     try:
@@ -336,14 +359,91 @@ def fetch_google_news(query):
                     continue
             except Exception:
                 continue
-            items.append({"title": title, "url": link, "source": source, "pub": pub_dt})
+            items.append({"title": title, "url": link, "source": source, "pub": pub_dt, "desc": ""})
     except Exception as e:
-        print(f"Google News error для '{query}': {e}")
+        print(f"Google News error '{query}': {e}")
     return items
+
+def fetch_bing_news(query):
+    url = f"https://www.bing.com/news/search?q={quote(query)}&format=rss"
+    items = []
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        soup = BeautifulSoup(r.content, "xml")
+        cutoff = datetime.now().astimezone() - timedelta(hours=NEWS_LOOKBACK_HOURS)
+        for it in soup.find_all("item"):
+            title = it.title.text if it.title else ""
+            link = it.link.text if it.link else ""
+            desc = it.description.text if it.description else ""
+            pub = it.pubDate.text if it.pubDate else ""
+            try:
+                pub_dt = parsedate_to_datetime(pub)
+                if pub_dt < cutoff:
+                    continue
+            except Exception:
+                continue
+            # вытаскиваем источник из URL (домен)
+            m = re.search(r'https?://(?:www\.)?([^/]+)', link)
+            source = m.group(1) if m else ""
+            items.append({"title": title, "url": link, "source": source, "pub": pub_dt, "desc": desc})
+    except Exception as e:
+        print(f"Bing error '{query}': {e}")
+    return items
+
+def fetch_telegram_channel(channel):
+    """Парсит публичную веб-версию ТГ канала."""
+    url = f"https://t.me/s/{channel}"
+    items = []
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code != 200:
+            return items
+        soup = BeautifulSoup(r.text, "html.parser")
+        cutoff = datetime.now().astimezone() - timedelta(hours=NEWS_LOOKBACK_HOURS)
+        for msg in soup.find_all("div", class_="tgme_widget_message"):
+            text_div = msg.find("div", class_="tgme_widget_message_text")
+            time_tag = msg.find("time")
+            if not text_div or not time_tag:
+                continue
+            text = text_div.get_text(" ", strip=True)
+            if not any(kw.lower() in text.lower() for kw in TG_KEYWORDS_RU):
+                continue
+            try:
+                pub_dt = datetime.fromisoformat(time_tag.get("datetime").replace("Z", "+00:00"))
+                if pub_dt < cutoff:
+                    continue
+            except Exception:
+                continue
+            link = msg.get("data-post")
+            link = f"https://t.me/{link}" if link else url
+            # короткий заголовок — первые 100 символов
+            title = text[:120].rstrip() + ("…" if len(text) > 120 else "")
+            desc = text[:300]
+            items.append({"title": title, "url": link, "source": f"t.me/{channel}", "pub": pub_dt, "desc": desc})
+    except Exception as e:
+        print(f"TG channel '{channel}' error: {e}")
+    return items
+
+def clean_title(title, source):
+    # Убираем " - Source" в конце заголовка Google News
+    return re.sub(r'\s*-\s*[^-]+$', '', title)
+
+def first_sentence(text):
+    if not text:
+        return ""
+    # Убираем HTML
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Первое предложение или первые 200 символов
+    parts = re.split(r'(?<=[.!?])\s+', text)
+    s = parts[0] if parts else text
+    return s[:250]
 
 def run_news_monitor():
     seen = load_seen(SEEN_NEWS_FILE)
     grouped = {}
+
+    # 1. Google News по всем категориям
     for category, queries in NEWS_QUERIES.items():
         items = []
         for q in queries:
@@ -353,35 +453,78 @@ def run_news_monitor():
                     continue
                 seen.add(uid)
                 items.append(it)
-            time.sleep(0.3)  # не долбим Google
-        # дедуп внутри категории по заголовку
+            time.sleep(0.3)
+        grouped[category] = items
+
+    # 2. Bing News — дополняем "Эмитенты" и "Геополитика" описаниями
+    bing_items = []
+    for q in BING_QUERIES:
+        for it in fetch_bing_news(q):
+            uid = make_id(it["url"])
+            if uid in seen:
+                continue
+            seen.add(uid)
+            bing_items.append(it)
+        time.sleep(0.3)
+    # Bing идёт в "Эмитенты" или "Геополитика" — раскидаем по простому правилу
+    for it in bing_items:
+        t_low = it["title"].lower()
+        if any(kw in t_low for kw in ["karapetyan", "карапетян", "arbitr", "арбитраж", "sanction", "санкци"]):
+            grouped.setdefault("Геополитика и арбитражи", []).append(it)
+        else:
+            grouped.setdefault("Эмитенты портфеля", []).append(it)
+
+    # 3. Telegram-каналы
+    tg_items = []
+    for ch in TG_CHANNELS:
+        for it in fetch_telegram_channel(ch):
+            uid = make_id(it["url"])
+            if uid in seen:
+                continue
+            seen.add(uid)
+            tg_items.append(it)
+    if tg_items:
+        grouped.setdefault("Telegram-каналы", []).extend(tg_items)
+
+    # Дедуп внутри категорий по сходству заголовка
+    for cat in grouped:
         unique = {}
-        for it in items:
-            key = it["title"][:80].lower()
+        for it in grouped[cat]:
+            key = re.sub(r'[^\w]', '', it["title"][:60]).lower()
             if key not in unique:
                 unique[key] = it
-        grouped[category] = sorted(unique.values(), key=lambda x: x["pub"], reverse=True)
+        grouped[cat] = sorted(unique.values(), key=lambda x: x["pub"], reverse=True)
 
     save_seen(seen, SEEN_NEWS_FILE)
 
-    # Формируем сообщения по категориям
-    emoji = {"Эмитенты портфеля": "🏢", "Макро Армении": "📊", "Геополитика и арбитражи": "⚖️"}
-    total = 0
+    # Отправка
+    emoji = {
+        "Эмитенты портфеля": "🏢",
+        "Макро Армении": "📊",
+        "Геополитика и арбитражи": "⚖️",
+        "Telegram-каналы": "📱",
+    }
+    total_sent = 0
     for category, items in grouped.items():
         if not items:
             continue
         header = f"{emoji.get(category, '📰')} <b>{category}</b> ({len(items)})"
         lines = []
         for it in items:
-            t = it["title"]
-            # отрезаем " - Source Name" в конце заголовка Google News, оно дублирует source
-            t = re.sub(r'\s*-\s*[^-]+$', '', t)
+            title_clean = clean_title(it["title"], it["source"])
+            title_ru = translate(title_clean)
             src = it["source"] or "—"
-            lines.append(f"• <a href=\"{it['url']}\">{t}</a> <i>({src})</i>")
-        sent = send_long_message(header, lines)
-        total += sent
+            line = f"• <a href=\"{it['url']}\">{title_ru}</a>"
+            # Если есть описание из Bing/TG — добавляем перевод первого предложения
+            desc_text = first_sentence(it.get("desc", ""))
+            if desc_text and len(desc_text) > 20:
+                desc_ru = translate(desc_text)
+                line += f"\n  <i>{desc_ru}</i>"
+            line += f"\n  <i>({src})</i>"
+            lines.append(line)
+        total_sent += send_long_message(header, lines)
         time.sleep(0.5)
-    print(f"Новостных сообщений отправлено: {total}")
+    print(f"Новостных сообщений: {total_sent}")
 
 # ============================================================
 # ЗАПУСК
@@ -391,21 +534,19 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "test":
         send_telegram(
             "🤖 <b>Armenia Bonds Monitor — тест</b>\n\n"
-            "✅ Новые выпуски: мониторинг активен\n"
-            f"📊 Мин. купон AMD: {MIN_COUPON_AMD}%\n"
-            f"💵 Мин. купон USD: {MIN_COUPON_USD}%\n"
+            "✅ Новые выпуски\n"
+            f"📊 Мин. купон AMD: {MIN_COUPON_AMD}%, USD: {MIN_COUPON_USD}%\n"
             f"📋 Бумаг в портфеле: {len(PORTFOLIO)}\n"
-            "🔔 Напоминания о погашении: за 30/14/7/3/1 день\n"
-            "💵 Купоны: за 3 дня, в день выплаты, проверка через 5 дней\n"
-            "📰 Новости: эмитенты + макро + геополитика, 2 раза в день"
+            "🔔 Погашения: за 30/14/7/3/1 день\n"
+            "💵 Купоны: 3 дня до / в день / +5 дней проверка\n"
+            "📰 Новости: Google + Bing + Telegram, 2 раза в день, на русском"
         )
     elif len(sys.argv) > 1 and sys.argv[1] == "news":
-        # Только новости — для отладки
         run_news_monitor()
     else:
-        print("=== Погашения портфеля ===")
+        print("=== Погашения ===")
         check_maturities()
-        print("=== Купонные выплаты ===")
+        print("=== Купоны ===")
         check_coupons()
         print("=== Новые выпуски ===")
         run_new_bonds_monitor()
