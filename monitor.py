@@ -32,6 +32,9 @@ MIN_COUPON_AMD = 9.0
 MIN_COUPON_USD = 8.0
 NEWS_LOOKBACK_HOURS = 12
 
+# STIGB1 — ежедневный отчёт по цене закрытия AMX
+STIGB1_ISIN = "AMSTIGB21ER8"
+
 # ============================================================
 # ПОРТФЕЛЬ
 # ============================================================
@@ -233,6 +236,55 @@ def check_coupons():
                 alerts.append(f"❓ <b>{bond['name']}</b> — купон был 5 дней назад ({coupon_date.strftime('%d.%m.%Y')}). Если не зачислили — пиши брокеру.")
     if alerts:
         send_long_message("💵 <b>Купонные выплаты</b>", alerts)
+
+# ============================================================
+# STIGB1 — ЦЕНА ЗАКРЫТИЯ AMX
+# ============================================================
+def check_stigb1_price():
+    try:
+        r = requests.get(f"https://amx.am/api/getInstrument/{STIGB1_ISIN}", timeout=15)
+        data = r.json().get("data")
+    except Exception as e:
+        print(f"STIGB1 fetch error: {e}")
+        send_telegram(f"⚠️ STIGB1: не удалось получить данные с AMX ({e})")
+        return
+
+    if not data or not data.get("market_data"):
+        send_telegram("⚠️ STIGB1: AMX не вернул данные по торгам")
+        return
+
+    market_data = sorted(data["market_data"], key=lambda x: x["order_date"])
+    latest = market_data[-1]
+
+    if latest.get("trades_number") and latest.get("close_price"):
+        session = latest
+        status = f"✅ Торги прошли ({latest['trades_number']} сделок)"
+    else:
+        traded = [m for m in market_data if m.get("trades_number") and m.get("close_price")]
+        session = traded[-1] if traded else latest
+        status = "⚠️ Торгов не было" + (f", цена — последняя сделка" if traded else "")
+
+    trade_date = datetime.strptime(session["order_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+    price = session.get("close_price")
+    ytm = session.get("close_yield")
+    bid = latest.get("best_bid_price")
+    ask = latest.get("best_ask_price")
+
+    lines = [
+        "📊 <b>STIGB1 — дневной отчёт (AMX)</b>",
+        "",
+        f"📅 Дата сессии: {trade_date}",
+    ]
+    if price is not None:
+        lines.append(f"💰 Цена закрытия: {float(price):.4f}")
+    if ytm is not None:
+        lines.append(f"📈 YTM: {float(ytm):.2f}%")
+    lines.append(status)
+    if bid or ask:
+        lines.append(f"Bid/Ask: {bid or '—'} / {ask or '—'}")
+
+    send_telegram("\n".join(lines))
+    print(f"STIGB1: {price} / YTM {ytm} / {status}")
 
 # ============================================================
 # НОВЫЕ ВЫПУСКИ (старая логика)
@@ -543,6 +595,8 @@ if __name__ == "__main__":
         )
     elif len(sys.argv) > 1 and sys.argv[1] == "news":
         run_news_monitor()
+    elif len(sys.argv) > 1 and sys.argv[1] == "stigb1":
+        check_stigb1_price()
     else:
         print("=== Погашения ===")
         check_maturities()

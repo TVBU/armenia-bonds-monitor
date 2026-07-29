@@ -2,8 +2,9 @@ name: Armenia Bonds Monitor
 
 on:
   schedule:
-    - cron: "0 5 * * *"   # 9:00 Yerevan
-    - cron: "0 14 * * *"  # 18:00 Yerevan
+    - cron: "0 5 * * *"       # 9:00 Yerevan
+    - cron: "0 14 * * *"      # 18:00 Yerevan
+    - cron: "30 11 * * 1-5"   # 15:30 Yerevan, будни — после закрытия AMX (STIGB1)
   workflow_dispatch:
 
 jobs:
@@ -18,7 +19,12 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
       - name: Run monitor
-        run: python monitor.py
+        run: |
+          if [ "${{ github.event.schedule }}" = "30 11 * * 1-5" ]; then
+            python monitor.py stigb1
+          else
+            python monitor.py
+          fi
       - name: Commit seen files
         run: |
           git config user.name "github-actions"
