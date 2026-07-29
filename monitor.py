@@ -15,6 +15,7 @@ import os
 import re
 import hashlib
 import time
+import calendar
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from urllib.parse import quote
@@ -37,18 +38,38 @@ STIGB1_ISIN = "AMSTIGB21ER8"
 
 # ============================================================
 # ПОРТФЕЛЬ
+# Даты погашения / первого купона / частота берутся ЖИВЬЁМ с AMX API
+# по тикеру (см. get_amx_bond_info) — не хардкодятся.
+# "fallback" — только для бумаг, которых ещё нет в листинге AMX
+# (например, в первичном размещении); при появлении на AMX
+# используются уже реальные данные автоматически.
 # ============================================================
 PORTFOLIO = [
-    {"name": "HELCB5 (ENA AMD)",           "isin": "HELCB5",       "maturity": "2030-11-01", "coupon": "10.75%", "currency": "AMD", "coupon_freq_months": 3},
-    {"name": "ACBABP (ACBA AMD)",          "isin": "ACBABP",       "maturity": "2031-02-01", "coupon": "10.25%", "currency": "AMD", "coupon_freq_months": 6},
-    {"name": "ACBABI (ACBA AMD)",          "isin": "ACBABI",       "maturity": "2029-11-01", "coupon": "10.5%",  "currency": "AMD", "coupon_freq_months": 6},
-    {"name": "AMTLB3 (Telecom Armenia AMD)","isin": "AMTLB3",      "maturity": "2029-12-01", "coupon": "11.5%",  "currency": "AMD", "coupon_freq_months": 6},
-    {"name": "DLNTB1 (Dalan Tech AMD)",    "isin": "DLNTB1",       "maturity": "2028-11-01", "coupon": "13.5%",  "currency": "AMD", "coupon_freq_months": 6},
-    {"name": "HELCB3 (ENA USD)",           "isin": "HELCB3",       "maturity": "2029-08-01", "coupon": "7.25%",  "currency": "USD", "coupon_freq_months": 3},
-    {"name": "UNIBBS (Unibank USD)",       "isin": "UNIBBS",       "maturity": "2031-11-01", "coupon": "6.25%",  "currency": "USD", "coupon_freq_months": 6},
-    {"name": "AMTLB1 (Telecom Armenia USD)","isin": "AMTLB1",      "maturity": "2029-12-01", "coupon": "6.75%",  "currency": "USD", "coupon_freq_months": 6},
-    {"name": "AMINTMB23ER3 (Intelligent Mgmt AMD)", "isin": "AMINTMB23ER3", "maturity": "2029-05-18", "coupon": "11.9%", "currency": "AMD", "coupon_freq_months": 6},
-    {"name": "TMHDB4 (Team Holding USD)",  "isin": "TMHDB4",       "maturity": "2030-05-20", "coupon": "8.65%",  "currency": "USD", "coupon_freq_months": 6},
+    {"name": "ACBABI (ACBA Банк AMD)",              "ticker": "ACBABI"},
+    {"name": "ACBABP (ACBA Банк AMD)",               "ticker": "ACBABP"},
+    {"name": "AMTLB1 (Telecom Armenia USD)",         "ticker": "AMTLB1"},
+    {"name": "AMTLB3 (Telecom Armenia AMD)",         "ticker": "AMTLB3"},
+    {"name": "DLNTB1 (Dalan Technologies AMD)",      "ticker": "DLNTB1"},
+    {"name": "HELCB3 (ЭСА USD)",                     "ticker": "HELCB3"},
+    {"name": "HELCB5 (ЭСА AMD)",                     "ticker": "HELCB5"},
+    {"name": "INTMB3 (Intelligent Management AMD)",  "ticker": "INTMB3"},
+    {"name": "UNIBBS (Юнибанк USD)",                 "ticker": "UNIBBS"},
+    {"name": "AMRBBNQ (Америабанк AMD)",             "ticker": "AMRBBNQ"},
+    {"name": "ASGRB1 (Аске Групп AMD)",              "ticker": "ASGRB1"},
+    {"name": "TMHDB1 (Тим Холдинг AMD)",             "ticker": "TMHDB1"},
+    {"name": "GLBSB1 (Глобал Шиппинг AMD)",          "ticker": "GLBSB1"},
+    {"name": "NAGCB1 (New Age Construction AMD)",    "ticker": "NAGCB1"},
+    {"name": "ARLVB1 (Аринтерлев AMD)",              "ticker": "ARLVB1"},
+    {"name": "MTGRB1 (Метал Групп AMD)",             "ticker": "MTGRB1"},
+    {"name": "STAMB1 (Стамина AMD)",                 "ticker": "STAMB1"},
+    {"name": "NSANB1 (Нарсан AMD)",                  "ticker": "NSANB1"},
+    {"name": "NOUTB1 (Nout.am AMD)",                 "ticker": "NOUTB1"},
+    {
+        "name": "TMHDB4 (Тим Холдинг USD)", "ticker": "TMHDB4",
+        # ещё не появился в листинге AMX (первичное размещение) — расчётные даты
+        "fallback": {"maturity": "2030-05-20", "first_payment": "2026-11-20",
+                     "freq_months": 6, "coupon": "8.65%", "currency": "USD"},
+    },
 ]
 
 # ============================================================
@@ -166,12 +187,104 @@ def send_long_message(header, items):
     return sent
 
 # ============================================================
+# ДАННЫЕ ПО ОБЛИГАЦИЯМ С AMX (живые, не хардкод)
+# ============================================================
+AMX_FREQ_MONTHS = {"Monthly": 1, "Quarterly": 3, "Semi-Annually": 6, "Annually": 12}
+
+_amx_ticker_map = None
+
+def get_amx_ticker_map():
+    """Тикер -> полный ISIN, один запрос на весь прогон (кэш в памяти процесса)."""
+    global _amx_ticker_map
+    if _amx_ticker_map is not None:
+        return _amx_ticker_map
+    result = {}
+    try:
+        r = requests.post("https://amx.am/api/searchInstrument", json={}, timeout=20)
+        data = r.json()
+        def walk(o):
+            if isinstance(o, list):
+                for it in o:
+                    walk(it)
+            elif isinstance(o, dict):
+                if "ticker" in o and "isin" in o:
+                    result[o["ticker"]] = o["isin"]
+                for v in o.values():
+                    walk(v)
+        walk(data)
+    except Exception as e:
+        print(f"AMX searchInstrument error: {e}")
+    _amx_ticker_map = result
+    return result
+
+def get_amx_bond_info(ticker):
+    """Погашение/первый купон/частота/ставка — напрямую с AMX. None, если бумаги там нет."""
+    isin = get_amx_ticker_map().get(ticker)
+    if not isin:
+        return None
+    try:
+        r = requests.get(f"https://amx.am/api/getInstrument/{isin}", timeout=15)
+        d = r.json().get("data")
+    except Exception as e:
+        print(f"AMX getInstrument error for {ticker}: {e}")
+        return None
+    if not d or not d.get("maturity_date") or not d.get("first_payment_date"):
+        return None
+    return {
+        "maturity": datetime.strptime(d["maturity_date"], "%Y-%m-%d").date(),
+        "first_payment": datetime.strptime(d["first_payment_date"], "%Y-%m-%d").date(),
+        "freq_months": AMX_FREQ_MONTHS.get(d.get("cpn_frequency_en"), 6),
+        "coupon": f"{float(d['cpn_rate']):g}%",
+        "currency": d.get("currency", "AMD"),
+        "note": "",
+    }
+
+def get_bond_info(bond):
+    """AMX в приоритете; fallback — только для бумаг вне листинга (первичное размещение)."""
+    info = get_amx_bond_info(bond["ticker"])
+    if info:
+        return info
+    fb = bond.get("fallback")
+    if not fb:
+        return None
+    return {
+        "maturity": datetime.strptime(fb["maturity"], "%Y-%m-%d").date(),
+        "first_payment": datetime.strptime(fb["first_payment"], "%Y-%m-%d").date(),
+        "freq_months": fb["freq_months"],
+        "coupon": fb["coupon"],
+        "currency": fb["currency"],
+        "note": " ⚠️ дата расчётная (нет на AMX)",
+    }
+
+def month_add(d, months):
+    m = d.month - 1 + months
+    y = d.year + m // 12
+    m = m % 12 + 1
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return d.replace(year=y, month=m, day=day)
+
+def build_coupon_schedule(first_payment, maturity, freq_months):
+    """Считаем ВПЕРЁД от реальной даты первого купона — не назад от даты погашения."""
+    dates = []
+    d = first_payment
+    while d <= maturity:
+        dates.append(d)
+        d = month_add(d, freq_months)
+    if maturity not in dates:
+        dates.append(maturity)
+    return sorted(dates)
+
+# ============================================================
 # ПОГАШЕНИЯ
 # ============================================================
 def check_maturities():
     today = datetime.now().date()
     for bond in PORTFOLIO:
-        maturity = datetime.strptime(bond["maturity"], "%Y-%m-%d").date()
+        info = get_bond_info(bond)
+        if not info:
+            print(f"{bond['ticker']}: нет данных ни с AMX, ни fallback — пропуск")
+            continue
+        maturity = info["maturity"]
         days_left = (maturity - today).days
         if days_left < 0:
             continue
@@ -189,7 +302,7 @@ def check_maturities():
             msg = (
                 f"{urgency}\n\n"
                 f"📄 <b>{bond['name']}</b>\n"
-                f"💰 Купон: {bond['coupon']} {bond['currency']}\n"
+                f"💰 Купон: {info['coupon']} {info['currency']}{info['note']}\n"
                 f"📆 Дата погашения: {maturity.strftime('%d.%m.%Y')}\n"
                 f"⏳ Осталось дней: {days_left}\n\n"
                 f"💡 Подумай о реинвестировании!"
@@ -200,38 +313,20 @@ def check_maturities():
 # ============================================================
 # КУПОНЫ
 # ============================================================
-def get_coupon_dates(bond):
-    maturity = datetime.strptime(bond["maturity"], "%Y-%m-%d").date()
-    freq = bond.get("coupon_freq_months", 6)
-    today = datetime.now().date()
-    dates = []
-    d = maturity
-    while d > today - timedelta(days=30):
-        if d >= today - timedelta(days=30):
-            dates.append(d)
-        new_month = d.month - freq
-        new_year = d.year
-        while new_month <= 0:
-            new_month += 12
-            new_year -= 1
-        try:
-            d = d.replace(year=new_year, month=new_month)
-        except ValueError:
-            break
-        if d < today - timedelta(days=60):
-            break
-    return sorted(dates)
-
 def check_coupons():
     today = datetime.now().date()
     alerts = []
     for bond in PORTFOLIO:
-        for coupon_date in get_coupon_dates(bond):
+        info = get_bond_info(bond)
+        if not info:
+            print(f"{bond['ticker']}: нет данных ни с AMX, ни fallback — пропуск")
+            continue
+        for coupon_date in build_coupon_schedule(info["first_payment"], info["maturity"], info["freq_months"]):
             delta = (coupon_date - today).days
             if delta == 3:
-                alerts.append(f"💰 <b>{bond['name']}</b> — купон через 3 дня ({coupon_date.strftime('%d.%m.%Y')}, {bond['coupon']} {bond['currency']})")
+                alerts.append(f"💰 <b>{bond['name']}</b> — купон через 3 дня ({coupon_date.strftime('%d.%m.%Y')}, {info['coupon']} {info['currency']}){info['note']}")
             elif delta == 0:
-                alerts.append(f"✅ <b>{bond['name']}</b> — купон сегодня ({bond['coupon']} {bond['currency']}). Проверь зачисление.")
+                alerts.append(f"✅ <b>{bond['name']}</b> — купон сегодня ({info['coupon']} {info['currency']}){info['note']}. Проверь зачисление.")
             elif delta == -5:
                 alerts.append(f"❓ <b>{bond['name']}</b> — купон был 5 дней назад ({coupon_date.strftime('%d.%m.%Y')}). Если не зачислили — пиши брокеру.")
     if alerts:
